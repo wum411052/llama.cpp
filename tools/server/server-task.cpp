@@ -2,6 +2,7 @@
 
 #include "build-info.h"
 #include "server-chat.h"
+#include "server-ollama.h"
 #include "chat.h"
 #include "common.h"
 #include "json-schema-to-grammar.h"
@@ -324,6 +325,10 @@ json server_task_result_cmpl_final::to_json() {
             return to_json_oaicompat_asr();
         case TASK_RESPONSE_TYPE_ANTHROPIC:
             return stream ? to_json_anthropic_stream() : to_json_anthropic();
+        case TASK_RESPONSE_TYPE_OLLAMA_CHAT:
+            return to_json_ollama_chat();
+        case TASK_RESPONSE_TYPE_OLLAMA_GEN:
+            return to_json_ollama_gen();
         default:
             GGML_ASSERT(false && "Invalid task_response_type");
     }
@@ -985,6 +990,82 @@ json server_task_result_cmpl_final::to_json_anthropic_stream() {
     return events;
 }
 
+static std::string ollama_done_reason(stop_type stop) {
+    return stop == STOP_TYPE_LIMIT ? "length" : "stop";
+}
+
+static json ollama_tool_calls(const std::vector<common_chat_tool_call> & tool_calls) {
+    json out = json::array();
+    for (const auto & tool_call : tool_calls) {
+        json arguments;
+        try {
+            arguments = json::parse(tool_call.arguments);
+        } catch (const std::exception &) {
+            arguments = json::object();
+        }
+        out.push_back({
+            { "function", {
+                { "name",      tool_call.name },
+                { "arguments", std::move(arguments) },
+            } },
+        });
+    }
+    return out;
+}
+
+json server_task_result_cmpl_final::to_json_ollama_chat() {
+    common_chat_msg msg;
+    if (!oaicompat_msg.empty()) {
+        msg = oaicompat_msg;
+    } else {
+        msg.content = content.text;
+    }
+
+    json message = {
+        { "role",    "assistant" },
+        { "content", msg.content },
+    };
+
+    if (!msg.reasoning_content.empty()) {
+        message["thinking"] = msg.reasoning_content;
+    }
+    if (!msg.tool_calls.empty()) {
+        message["tool_calls"] = ollama_tool_calls(msg.tool_calls);
+    }
+
+    json res = {
+        { "model",       oaicompat_model },
+        { "created_at",  server_ollama_created_at() },
+        { "message",     std::move(message) },
+        { "done",        true },
+        { "done_reason", ollama_done_reason(stop) },
+    };
+
+    json durations = server_ollama_durations(stats.is_set() ? stats.to_json() : json::object(), n_prompt_tokens, n_decoded);
+    for (auto it = durations.begin(); it != durations.end(); ++it) {
+        res[it.key()] = it.value();
+    }
+
+    return res;
+}
+
+json server_task_result_cmpl_final::to_json_ollama_gen() {
+    json res = {
+        { "model",       oaicompat_model },
+        { "created_at",  server_ollama_created_at() },
+        { "response",    oaicompat_msg.empty() ? content.text : oaicompat_msg.content },
+        { "done",        true },
+        { "done_reason", ollama_done_reason(stop) },
+    };
+
+    json durations = server_ollama_durations(stats.is_set() ? stats.to_json() : json::object(), n_prompt_tokens, n_decoded);
+    for (auto it = durations.begin(); it != durations.end(); ++it) {
+        res[it.key()] = it.value();
+    }
+
+    return res;
+}
+
 //
 // server_task_result_cmpl_partial
 //
@@ -1044,6 +1125,10 @@ json server_task_result_cmpl_partial::to_json() {
             return to_json_oaicompat_asr();
         case TASK_RESPONSE_TYPE_ANTHROPIC:
             return to_json_anthropic();
+        case TASK_RESPONSE_TYPE_OLLAMA_CHAT:
+            return to_json_ollama_chat();
+        case TASK_RESPONSE_TYPE_OLLAMA_GEN:
+            return to_json_ollama_gen();
         default:
             GGML_ASSERT(false && "Invalid task_response_type");
     }
@@ -1471,6 +1556,37 @@ json server_task_result_cmpl_partial::to_json_anthropic() {
     }
 
     return events;
+}
+
+json server_task_result_cmpl_partial::to_json_ollama_chat() {
+    std::string thinking;
+    for (const auto & diff : oaicompat_msg_diffs) {
+        thinking += diff.reasoning_content_delta;
+    }
+
+    json message = {
+        { "role",    "assistant" },
+        { "content", content.text },
+    };
+    if (!thinking.empty()) {
+        message["thinking"] = std::move(thinking);
+    }
+
+    return json {
+        { "model",      oaicompat_model },
+        { "created_at", server_ollama_created_at() },
+        { "message",    std::move(message) },
+        { "done",       false },
+    };
+}
+
+json server_task_result_cmpl_partial::to_json_ollama_gen() {
+    return json {
+        { "model",      oaicompat_model },
+        { "created_at", server_ollama_created_at() },
+        { "response",   content.text },
+        { "done",       false },
+    };
 }
 
 //

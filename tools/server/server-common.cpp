@@ -1834,6 +1834,23 @@ std::string format_anthropic_sse(const json & data) {
     return ss.str();
 }
 
+std::string format_ollama_ndjson(const json & data) {
+    std::ostringstream ss;
+    auto send_single = [&ss](const json & item) {
+        ss << safe_json_to_str(item) << "\n";
+    };
+
+    if (data.is_array()) {
+        for (const auto & item : data) {
+            send_single(item);
+        }
+    } else {
+        send_single(data);
+    }
+
+    return ss.str();
+}
+
 bool is_valid_utf8(const std::string & str) {
     const unsigned char* bytes = reinterpret_cast<const unsigned char*>(str.data());
     const unsigned char* end = bytes + str.length();

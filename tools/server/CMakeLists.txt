@@ -15,6 +15,8 @@ add_library(${TARGET} STATIC
     server-common.h
     server-decision.cpp
     server-decision.h
+    server-ollama.cpp
+    server-ollama.h
     server-context.cpp
     server-context.h
     server-realtime.cpp

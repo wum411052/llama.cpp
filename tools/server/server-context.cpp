@@ -6,6 +6,7 @@
 #include "server-common.h"
 #include "server-decision.h"
 #include "server-http.h"
+#include "server-ollama.h"
 #include "server-task.h"
 #include "server-queue.h"
 #include "server-realtime.h"
@@ -5491,11 +5492,15 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             res->data = format_anthropic_sse(first_result_json);
         } else if (res_type == TASK_RESPONSE_TYPE_OAI_RESP) {
             res->data = format_oai_resp_sse(first_result_json);
+        } else if (res_type == TASK_RESPONSE_TYPE_OLLAMA_CHAT || res_type == TASK_RESPONSE_TYPE_OLLAMA_GEN) {
+            res->data = format_ollama_ndjson(first_result_json);
         } else {
             res->data = format_oai_sse(first_result_json);
         }
         res->status = 200;
-        res->content_type = "text/event-stream";
+        res->content_type = (res_type == TASK_RESPONSE_TYPE_OLLAMA_CHAT || res_type == TASK_RESPONSE_TYPE_OLLAMA_GEN)
+            ? "application/x-ndjson"
+            : "text/event-stream";
         res->set_next([res_this = res.get(), res_type, sse_ping_interval](std::string & output) -> bool {
             static auto format_error = [](task_response_type res_type, const json & res_json) {
                 if (res_type == TASK_RESPONSE_TYPE_ANTHROPIC) {
@@ -5503,6 +5508,8 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
                         {"event", "error"},
                         {"data", res_json},
                     });
+                } else if (res_type == TASK_RESPONSE_TYPE_OLLAMA_CHAT || res_type == TASK_RESPONSE_TYPE_OLLAMA_GEN) {
+                    return format_ollama_ndjson(json {{ "error", json_value(res_json, "message", std::string("unknown error")) }});
                 } else {
                     return format_oai_sse(json {{ "error", res_json }});
                 }
@@ -5533,6 +5540,8 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
                         case TASK_RESPONSE_TYPE_NONE:
                         case TASK_RESPONSE_TYPE_OAI_RESP:
                         case TASK_RESPONSE_TYPE_ANTHROPIC:
+                        case TASK_RESPONSE_TYPE_OLLAMA_CHAT:
+                        case TASK_RESPONSE_TYPE_OLLAMA_GEN:
                             output = "";
                             break;
 
@@ -5586,6 +5595,8 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
                         output = format_anthropic_sse(res_json);
                     } else if (res_type == TASK_RESPONSE_TYPE_OAI_RESP) {
                         output = format_oai_resp_sse(res_json);
+                    } else if (res_type == TASK_RESPONSE_TYPE_OLLAMA_CHAT || res_type == TASK_RESPONSE_TYPE_OLLAMA_GEN) {
+                        output = format_ollama_ndjson(res_json);
                     } else {
                         output = format_oai_sse(res_json);
                     }
@@ -5683,6 +5694,28 @@ static json get_res_models(const server_context_meta & meta) {
         {"data", json::array({
             get_res_model_info(meta),
         })}
+    };
+}
+
+static json server_ollama_details_json(const server_context_meta & meta) {
+    return json {
+        {"parent_model",       ""},
+        {"format",             "gguf"},
+        {"family",             ""},
+        {"families",           json::array()},
+        {"parameter_size",     ""},
+        {"quantization_level", meta.model_ftype},
+    };
+}
+
+static json server_ollama_model_json(const server_context_meta & meta) {
+    return json {
+        {"name",        meta.model_name},
+        {"model",       meta.model_name},
+        {"modified_at", ""},
+        {"size",        meta.model_size},
+        {"digest",      ""},
+        {"details",     server_ollama_details_json(meta)},
     };
 }
 
@@ -6427,6 +6460,103 @@ void server_routes::init_routes() {
         return handle_count_tokens(req, TASK_RESPONSE_TYPE_ANTHROPIC);
     };
 
+    // Ollama API compat, see server-ollama.cpp
+    auto ollama_completion = [this](const server_http_req & req, json & body, task_response_type res_type) {
+        std::vector<raw_buffer> files;
+        common_chat_session session;
+        json body_parsed = oaicompat_chat_params_parse(
+            ctx_server.vocab,
+            body,
+            meta->chat_params,
+            files,
+            session);
+        return handle_completions_impl(
+            req,
+            SERVER_TASK_TYPE_COMPLETION,
+            body_parsed,
+            files,
+            res_type,
+            session);
+    };
+
+    this->post_ollama_chat = [this, ollama_completion](const server_http_req & req) {
+        json body = server_ollama_chat_to_oai(json::parse(req.body));
+        SRV_DBG("%s\n", "Request converted: Ollama chat -> OpenAI Chat Completions");
+        SRV_DBG("converted request: %s\n", body.dump().c_str());
+        return ollama_completion(req, body, TASK_RESPONSE_TYPE_OLLAMA_CHAT);
+    };
+
+    this->post_ollama_generate = [this, ollama_completion](const server_http_req & req) {
+        json body = server_ollama_generate_to_oai(json::parse(req.body));
+        SRV_DBG("%s\n", "Request converted: Ollama generate -> OpenAI Chat Completions");
+        SRV_DBG("converted request: %s\n", body.dump().c_str());
+        return ollama_completion(req, body, TASK_RESPONSE_TYPE_OLLAMA_GEN);
+    };
+
+    this->post_ollama_embeddings = [this](const server_http_req & req) {
+        // /api/embeddings passes the text as "prompt", the shared path reads "input"
+        server_http_req ollama_req = req;
+        json body = ollama_req.body.empty() ? json::object() : json::parse(ollama_req.body);
+        if (body.contains("prompt")) {
+            body["input"] = std::move(body["prompt"]);
+            body.erase("prompt");
+        }
+        ollama_req.body = body.dump();
+        return handle_embeddings_impl(ollama_req, TASK_RESPONSE_TYPE_OLLAMA_EMBD);
+    };
+
+    this->get_ollama_tags = [this](const server_http_req &) {
+        auto res = create_response(true);
+        res->ok(json {
+            { "models", json::array({ server_ollama_model_json(*meta) }) },
+        });
+        return res;
+    };
+
+    this->get_ollama_ps = [this](const server_http_req &) {
+        auto res = create_response(true);
+        json model = server_ollama_model_json(*meta);
+        model["size_vram"]  = meta->model_size;
+        model["expires_at"] = "";
+        res->ok(json {
+            { "models", json::array({ std::move(model) }) },
+        });
+        return res;
+    };
+
+    this->get_ollama_version = [this](const server_http_req &) {
+        auto res = create_response(true);
+        res->ok(json { { "version", meta->build_info } });
+        return res;
+    };
+
+    this->post_ollama_show = [this](const server_http_req &) {
+        auto res = create_response(true);
+        json capabilities = json::array();
+        if (meta->has_cap_chat) {
+            capabilities.push_back("completion");
+        }
+        if (meta->has_mtmd) {
+            capabilities.push_back("vision");
+        }
+        res->ok(json {
+            { "modelfile",    "" },
+            { "parameters",   "" },
+            { "template",     common_chat_templates_source(meta->chat_params.tmpls.get(), "") },
+            { "details",      server_ollama_details_json(*meta) },
+            { "capabilities", std::move(capabilities) },
+        });
+        return res;
+    };
+
+    this->post_ollama_model_management = [this](const server_http_req &) {
+        auto res = create_response(true);
+        // the server hosts one local model, there is no registry to manage
+        res->status = 501;
+        res->data = safe_json_to_str(server_ollama_error("model management is not supported by llama.cpp server"));
+        return res;
+    };
+
     // same with handle_chat_completions, but without inference part
     this->post_apply_template = [this](const server_http_req & req) {
         auto res = create_response();
@@ -6894,9 +7024,19 @@ std::unique_ptr<server_res_generator> server_routes::handle_embeddings_impl(cons
     }
 
     // write JSON response
-    json root = res_type == TASK_RESPONSE_TYPE_OAI_EMBD
-        ? format_embeddings_response_oaicompat(body, meta->model_name, responses, use_base64)
-        : json(responses);
+    json root;
+    if (res_type == TASK_RESPONSE_TYPE_OAI_EMBD) {
+        root = format_embeddings_response_oaicompat(body, meta->model_name, responses, use_base64);
+    } else if (res_type == TASK_RESPONSE_TYPE_OLLAMA_EMBD) {
+        // Ollama wants a flat vector, the non-OAI embedding json nests it one level
+        json embedding = json::array();
+        if (!responses.empty() && responses[0]["embedding"].is_array() && !responses[0]["embedding"].empty()) {
+            embedding = responses[0]["embedding"][0];
+        }
+        root = json { { "embedding", std::move(embedding) } };
+    } else {
+        root = json(responses);
+    }
     res->ok(root);
     return res;
 }

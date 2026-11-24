@@ -582,6 +582,9 @@ std::string format_oai_resp_sse(const json & data);
 // format Anthropic-style SSE with event types
 std::string format_anthropic_sse(const json & data);
 
+// format newline-delimited JSON, one object per line, as used by the Ollama API
+std::string format_ollama_ndjson(const json & data);
+
 bool is_valid_utf8(const std::string & str);
 
 //

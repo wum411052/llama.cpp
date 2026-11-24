@@ -139,6 +139,16 @@ struct server_routes {
     server_http_context::handler_t get_lora_adapters;
     server_http_context::handler_t post_lora_adapters;
 
+    // Ollama API compat, see server-ollama.cpp
+    server_http_context::handler_t post_ollama_chat;
+    server_http_context::handler_t post_ollama_generate;
+    server_http_context::handler_t post_ollama_embeddings;
+    server_http_context::handler_t get_ollama_tags;
+    server_http_context::handler_t get_ollama_ps;
+    server_http_context::handler_t get_ollama_version;
+    server_http_context::handler_t post_ollama_show;
+    server_http_context::handler_t post_ollama_model_management; // pull/push/create/copy/delete
+
     // to be used in router mode
     json get_model_info() const;
 

@@ -192,6 +192,19 @@ static void server_register_routes(server_http_context & ctx_http, server_routes
     ctx_http.post("/audio/speech",             ex_wrapper(routes.post_speech_oai));
     ctx_http.ws  ("/v1/realtime",              routes.ws_realtime);
     ctx_http.post("/v1/messages",              ex_wrapper(routes.post_anthropic_messages)); // anthropic messages API
+    // Ollama API compat, see server-ollama.cpp
+    ctx_http.post("/api/chat",                 ex_wrapper(routes.post_ollama_chat));
+    ctx_http.post("/api/generate",             ex_wrapper(routes.post_ollama_generate));
+    ctx_http.post("/api/embeddings",           ex_wrapper(routes.post_ollama_embeddings));
+    ctx_http.get ("/api/tags",                 ex_wrapper(routes.get_ollama_tags));
+    ctx_http.get ("/api/ps",                   ex_wrapper(routes.get_ollama_ps));
+    ctx_http.get ("/api/version",              ex_wrapper(routes.get_ollama_version));
+    ctx_http.post("/api/show",                 ex_wrapper(routes.post_ollama_show));
+    ctx_http.post("/api/pull",                 ex_wrapper(routes.post_ollama_model_management));
+    ctx_http.post("/api/push",                 ex_wrapper(routes.post_ollama_model_management));
+    ctx_http.post("/api/create",               ex_wrapper(routes.post_ollama_model_management));
+    ctx_http.post("/api/copy",                 ex_wrapper(routes.post_ollama_model_management));
+    ctx_http.del ("/api/delete",               ex_wrapper(routes.post_ollama_model_management));
     ctx_http.post("/infill",                   ex_wrapper(routes.post_infill));
     ctx_http.post("/embedding",                ex_wrapper(routes.post_embeddings)); // legacy
     ctx_http.post("/embeddings",               ex_wrapper(routes.post_embeddings));
@@ -521,6 +534,14 @@ static int server_run_router(common_params & params, int argc, char ** argv, con
     routes.ws_realtime                 = models_routes->proxy_ws;
     routes.post_anthropic_messages     = models_routes->proxy_post;
     routes.post_anthropic_count_tokens = models_routes->proxy_post;
+    routes.post_ollama_chat            = models_routes->proxy_post;
+    routes.post_ollama_generate        = models_routes->proxy_post;
+    routes.post_ollama_embeddings      = models_routes->proxy_post;
+    routes.post_ollama_show            = models_routes->proxy_post;
+    routes.post_ollama_model_management = models_routes->proxy_post;
+    routes.get_ollama_tags             = models_routes->proxy_get;
+    routes.get_ollama_ps               = models_routes->proxy_get;
+    routes.get_ollama_version          = models_routes->proxy_get;
     routes.post_infill                 = models_routes->proxy_post;
     routes.post_embeddings             = models_routes->proxy_post;
     routes.post_embeddings_oai         = models_routes->proxy_post;
